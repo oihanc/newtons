@@ -2,8 +2,8 @@
 title: "Rapport de laboratoire 3"
 subtitle: "MTH8408"
 author:
-  - name: Votre nom
-    email: votre.adresse@polymtl.ca
+  - name: Oihan Cordelier
+    email: oihan.cordelier@polymtl.ca
     affiliation:
       - name: Polytechnique Montréal
 format:
@@ -12,9 +12,7 @@ format:
     documentclass: article
     include-in-header:
       - text: |
-            \usepackage{eulervm}
             \usepackage{xspace}
-            \usepackage[francais]{babel}
     geometry:
       - margin=1in
     papersize: letter
@@ -27,7 +25,12 @@ engine: julia
 #| output: false
 using Pkg
 Pkg.activate("labo3_env")
+
+Pkg.add("ADNLPModels")
+Pkg.add("NLPModels")
+
 using LinearAlgebra
+using NLPModels, ADNLPModels, Printf
 ```
 
 # Contexte
@@ -57,9 +60,111 @@ Votre implémentation doit avoir les caractéristiques suivantes :
 Tester votre implémentation sur le problème polynomial vu en classe et les problèmes non linéaires de la section *Problèmes test* ci-dessous.
 
 ```{julia}
-function newton_modifiee(model, eps_a=1.0e-5, eps_r=1.0e-5)
-  # votre code ici
+# Package to do LDL factorization (required for the modified Newton implementation)
+Pkg.add("LDLFactorizations")
+using LDLFactorizations
+
+
+"""
+    newton_modifiee(model, eps_a=1e-5, eps_r=1e-5)
+
+Return the argmin of the model's objective function using a modified Newton implementation.
+The hessian is decomposed using LDL. The diagonal matrix is forced to be definite positive.
+The descent direction is found by solving (LDL dk = -gk).
+Inexact line search is performed using Armijo line search.
+
+...
+# Arguments
+- `model::ADNLPModel`: ADNLPModel of the function to be minimized.
+- `eps_a::float=1e-5`: absolute tolerance criterion.
+- `eps_r::float=1e-5`: relative tolerance criterion.
+...
+"""
+function newton_modifiee(model, eps_a=1e-5, eps_r=1e-5)
+    
+    # Model starting location
+    x0 = model.meta.x0
+    dim = length(x0)
+    max_iter = 3 * dim
+
+    xk = copy(x0)
+    grad0 = grad(model, xk)
+    norm_grad0 = norm(grad0)
+    gradk = similar(xk)
+    Hk = similar(hess(model, x0))
+    Hk_sym = similar(Hk)
+    dk = similar(xk)
+
+    # Armijo parameters
+    delta = sqrt(eps())
+    armijo_tol = 1.0e-4
+    rho = 0.5
+    x_new = similar(xk)
+    f_new = 0.0
+
+    for k = 1:max_iter
+
+        # Exact gradient vector
+        gradk .= grad(model, xk)
+        norm_gradk = norm(gradk)
+
+        if norm_gradk <= eps_a + eps_r * norm_grad0
+            println("Converged in $(k-1) iterations. grad_norm= ", norm_gradk)
+            return xk
+        end
+
+        # Exact hessian matrix
+        Hk .= hess(model, xk)
+        Hk_sym = Symmetric(triu(Hk), :U)
+        LDL = ldl(Hk_sym)
+
+        # Modify the diagonal to ensure it is definite positive
+        # This implementation can lead to numerical instability
+        # Source: https://www.cs.nthu.edu.tw/~cherung/teaching/2011cs5321/handout3.pdf (slide 8/20)
+        # Could be vectorized for improved performance.
+        for i in 1:size(LDL.D, 1)
+            LDL.D[i, i] = max(LDL.D[i, i], delta)
+        end
+
+        # Solve the linear system to find the descent direction
+        ldiv!(dk, LDL, -gradk)
+
+        # Verify that dk is a descent direction
+        dot_gradk_dk = dot(dk, gradk)
+
+        if dot_gradk_dk >= 0
+            error("Search direction is not descent")
+        end
+
+        # For stability purposes -> normalize the descent direction if large
+        dk_norm = norm(dk)
+        if dk_norm > 1.0e2
+            dk .= dk ./ dk_norm
+            dot_gradk_dk = dot(gradk, dk)
+        end
+
+        # Inexact line search -> Armijo
+        alphak = 1.0
+        fk = obj(model, xk)
+        
+        for i in 1:50
+          x_new .= xk .+ alphak .* dk
+          f_new = obj(model, x_new)
+          if f_new <= fk + armijo_tol * alphak * dot_gradk_dk
+            break
+          end
+          alphak *= rho
+        end
+
+        xk .= x_new
+
+        @printf("| k= %3d | grad_norm= %10.3e | alpha= %.3e | f= %.3e |\n", k, norm_gradk, alphak, f_new)
+    end
+
+    println("Reached max iterations")
+    return xk
 end
+
 ```
 
 # Question 2
@@ -73,8 +178,135 @@ Il faut de plus ajuster votre méthode de manière à encourager la convergence 
 Tester votre implémentation sur le problème polynomial vu en classe et les problèmes non linéaires de la section *Problèmes test* ci-dessous.
 
 ```{julia}
+
+"""
+    newton_inexacte(model, eps_a=1e-5, eps_r=1e-5)
+
+Return the argmin of the model's objective function using a inexact Newton implementation.
+The implementation follows the line search newton-cg method discussed in Numerical 
+Optimization (Nocedal et al.), also known as the truncated Newton method. The forcing 
+sequence is set to eta_k = min(0.5; sqrt(norm(gk))) to obtain a superlinear convergence 
+rate. Inexact line search is performed using Armijo line search.
+
+...
+# Arguments
+- `model::ADNLPModel`: ADNLPModel of the function to be minimized.
+- `eps_a::float=1e-5`: absolute tolerance criterion.
+- `eps_r::float=1e-5`: relative tolerance criterion.
+...
+"""
 function newton_inexacte(model, eps_a=1.0e-5, eps_r=1.0e-5)
   # votre code ici
+
+  xk = copy(model.meta.x0)
+  dim = length(xk)
+  max_iter = 10 * dim
+  
+  x0 = copy(xk)
+  grad0 = grad(model, xk)
+  norm_grad0 = norm(grad0)
+
+  pk = similar(grad0)
+  Hk = similar(hess(model, x0))
+
+  x_new = similar(xk)
+
+  max_inner_j = 10*max_iter
+
+  # Armijo parameters
+  armijo_tol = 1.0e-4
+  rho = 0.5
+  f_new = 0.0
+
+  for k in 1:max_iter
+
+      gk = grad(model, xk)
+      norm_gk = norm(gk)
+
+      if norm_gk <= eps_a + eps_r * norm_grad0
+          println("Converged in $(k-1) iterations. grad_norm= ", norm_gk)
+          return xk
+      end
+
+      Hk .= hess(model, xk)
+
+      # For local superlinear convergence (Nocedal, page 168)
+      eta_k = min(0.5, sqrt(norm_gk))
+      eps_k = eta_k*norm_gk
+
+      zj = zeros(dim)
+      rj = copy(gk)
+      # rj_new = similar(rj)
+      dj = -rj
+
+      # Will raise an exception if the value of pk is not updated
+      # because of the descent direction check
+      pk = zeros(dim)
+
+      for j in 1:max_inner_j
+        Bdj = Hk * dj
+        djBdj = dot(dj, Bdj)
+
+        if djBdj <= 0
+          if j == 0
+            pk = -gk
+            break
+          else
+            pk .= zj
+            break
+          end
+        end
+
+        alphaj = dot(rj, rj) / djBdj
+        zj .+= alphaj .* dj
+        rj_new = rj .+ alphaj .* Bdj
+
+        if norm(rj_new) < eps_k
+            pk .= zj
+            break
+        end
+
+        betaj = dot(rj_new, rj_new) / dot(rj, rj)
+        dj .= -rj_new .+ betaj .* dj
+        rj .= rj_new
+
+        if j == max_inner_j
+          error("Max iteration reached for the inner loop.")
+        end
+      end
+
+      # Add logic if pk not found after max number of iteration reached
+      # -> will raise error max_inner_j or search direction
+
+      # pk is the descent direction
+      # dk <=> pk
+      dot_gradk_dk = dot(gk, pk)
+
+      # Check if pk is a descent direction
+      if dot_gradk_dk >= 0
+        error("Search direction is not descent")
+      end
+
+      # Inexact line search -> Armijo
+      alphak = 1.0
+      fk = obj(model, xk)
+      
+      for i in 1:50
+        x_new .= xk .+ alphak .* pk
+        f_new = obj(model, x_new)
+        if f_new <= fk + armijo_tol * alphak * dot_gradk_dk
+          break
+        end
+        alphak *= rho
+      end
+
+      xk .= x_new
+
+      @printf("| k= %3d | grad_norm= %10.3e | alpha= %.3e | f= %.3e | eps_k= %.3e |\n", k, norm_gk, alphak, f_new, eps_k)
+  end
+
+    println("Maximum number of iterations reached.")
+    return xk
 end
 ```
 
@@ -85,8 +317,19 @@ end
 Votre premier problème test sera le problème polynomial vu en classe.
 
 ```{julia}
-# f(x) = ...
-# model = ADNLPModel(...)
+
+# Define the analytical function and set the ADNLP model
+f(x) = 2.0*x[1]^3 - 3.0*x[1]^2 - 6.0*x[1]*x[2]*(x[1] - x[2] - 1.0)
+model = ADNLPModel(f, [0.6, 0.5])   # Define a starting point near the known local minima (1.0, 0.0)
+
+println("--- Modified Newton Method ---")
+x_star = newton_modifiee(model)
+println("x_star= ", x_star)
+
+println("--- Inexact Newton Method ---")
+x_star = newton_inexacte(model)
+println("x_star= ", x_star)
+
 ```
 
 Utiliser ensuite les problèmes non linéaires du dépôt `OptimizationProblems.jl` qui sont sans contraintes et ont 100 variables.
@@ -106,15 +349,52 @@ Parmis ces problèmes, choisissez-en 3 et illustrez le comportement de chacune d
 ## Validation de la méthode de Newton modifiée
 
 ```{julia}
-# votre code ici
+# Uncomment to view all available problems with no constraint and 100 variables
+# println(problem_list)
+
+# Append 3 models to the list. These models will be use to validate both implementations.
+models = []
+push!(models, OptimizationProblems.ADNLPProblems.chainwoo())
+push!(models, OptimizationProblems.ADNLPProblems.errinros_mod())
+push!(models, OptimizationProblems.ADNLPProblems.freuroth())
+
+# Validation of the modified newton method
+x_star = newton_modifiee(models[1])
+x_star = newton_modifiee(models[2])
+x_star = newton_modifiee(models[3]);
+
 ```
 
 ## Validation de la méthode de Newton tronquée
 
 ```{julia}
-# votre code ici
+# Validation of the inexact newton method
+x_star = newton_inexacte(models[1])
+x_star = newton_inexacte(models[2])
+x_star = newton_inexacte(models[3]);
+
 ```
 
 ## Commentaires sur les résultats
 
 <!-- Insérer ici votre évaluation des résultats -->
+Les 2 méthodes implémentées convergent jusqu'aux tolérances demandées, c'est-à-dire une 
+tolérance absolue et relative de $10^{-5}$. Les 2 méthodes y arrivent en un nombre respectable 
+d'itérations, cependant la méthode Newton inexacte réussie à convergence sur les mêmes problèmes avec 
+un plus faible nombre d'itérations. Le tableau ci-dessous énumère le nombre d'itérations requis pour 
+atteindre la convergence sur chacun des problèmes et en fonction de chaque méthode.
+
+| Modifiée | Inexacte |
+| -------- | -------- |
+| 54       | 29       |
+| 84       | 16       |
+| 21       | 12       |
+
+De plus, pour la méthode de Newton inexacte, la séquence $\eta_k$ tend vers 0 (du moins, il y a une réduction 
+importante par rapport à la valeur initiale). Il s'agit d'un 
+comportement attendu selon *Nocedal et Wright* pour une convergence superlinéaire. $\eta_k \to 0$ est 
+une condition nécessaire à la convergence superlinéaire, mais ne la garantie pas.
+
+Pour les 2 méthodes, le temps d'exécution est respectable, ce qui suggère que ce sont des méthodes 
+intéressantes à utiliser pour optimiser des fonctoins non quadratique, non contrainte et dont la matrice
+Hessienne est connue.
