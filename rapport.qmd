@@ -380,9 +380,10 @@ x_star = newton_inexacte(models[3]);
 <!-- Insérer ici votre évaluation des résultats -->
 Les 2 méthodes implémentées convergent jusqu'aux tolérances demandées, c'est-à-dire une 
 tolérance absolue et relative de $10^{-5}$. Les 2 méthodes y arrivent en un nombre respectable 
-d'itérations, cependant la méthode Newton inexacte réussie à convergence sur les mêmes problèmes avec 
+d'itérations, cependant la méthode Newton inexacte réussit à convergence sur les mêmes problèmes avec 
 un plus faible nombre d'itérations. Le tableau ci-dessous énumère le nombre d'itérations requis pour 
 atteindre la convergence sur chacun des problèmes et en fonction de chaque méthode.
+
 
 | Modifiée | Inexacte |
 | -------- | -------- |
@@ -390,11 +391,12 @@ atteindre la convergence sur chacun des problèmes et en fonction de chaque mét
 | 84       | 16       |
 | 21       | 12       |
 
+
 De plus, pour la méthode de Newton inexacte, la séquence $\eta_k$ tend vers 0 (du moins, il y a une réduction 
 importante par rapport à la valeur initiale). Il s'agit d'un 
 comportement attendu selon *Nocedal et Wright* pour une convergence superlinéaire. $\eta_k \to 0$ est 
-une condition nécessaire à la convergence superlinéaire, mais ne la garantie pas.
+une condition nécessaire à la convergence superlinéaire, mais ne la garantit pas.
 
 Pour les 2 méthodes, le temps d'exécution est respectable, ce qui suggère que ce sont des méthodes 
-intéressantes à utiliser pour optimiser des fonctoins non quadratique, non contrainte et dont la matrice
+intéressantes à utiliser pour optimiser des fonctions non quadratiques, non contraintes et dont la matrice
 Hessienne est connue.
